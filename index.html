@@ -3,7 +3,14 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#000000" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    
     <title>Talking Interval Clock</title>
+    
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="manifest.json" />
     
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -82,10 +89,12 @@
         background: #52525b; 
       }
     </style>
-<script type="importmap">
+    
+    <script type="importmap">
 {
   "imports": {
-    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "react": "https://unpkg.com/react@18/umd/react.production.min.js",
+    "react-dom": "https://unpkg.com/react-dom@18/umd/react-dom.production.min.js",
     "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
     "react/": "https://aistudiocdn.com/react@^19.2.0/",
     "lucide-react": "https://aistudiocdn.com/lucide-react@^0.555.0"
@@ -184,6 +193,63 @@
             window.speechSynthesis.speak(utterance);
         };
 
+        // --- BACKGROUND KEEP-ALIVE UTILS ---
+        
+        // 1. Web Worker Blob (Runs timer in background thread)
+        const workerScript = `
+            self.onmessage = function(e) {
+                if (e.data === 'start') {
+                    setInterval(() => {
+                        self.postMessage('tick');
+                    }, 1000);
+                }
+            };
+        `;
+        const workerBlob = new Blob([workerScript], { type: 'application/javascript' });
+        const workerUrl = URL.createObjectURL(workerBlob);
+
+        // 2. Wake Lock (Keeps screen on)
+        const requestWakeLock = async () => {
+            try {
+                if ('wakeLock' in navigator) {
+                    const lock = await navigator.wakeLock.request('screen');
+                    return lock;
+                }
+            } catch (err) {
+                console.log('Wake Lock error:', err);
+            }
+            return null;
+        };
+
+        // 3. Silent Audio (Keeps audio context active)
+        const playSilentAudio = () => {
+             const AudioContext = window.AudioContext || window.webkitAudioContext;
+             if (!AudioContext) return;
+             
+             // Check if context already exists to avoid creating multiple
+             if (window.keepAliveAudioCtx) return;
+
+             const audioCtx = new AudioContext();
+             window.keepAliveAudioCtx = audioCtx; // Store globally
+
+             const oscillator = audioCtx.createOscillator();
+             const gainNode = audioCtx.createGain();
+             
+             // Use a sub-audible frequency (0.1 Hz)
+             // Humans hear from 20Hz - 20,000Hz. 0.1Hz is effectively static pressure change.
+             oscillator.type = 'sine';
+             oscillator.frequency.value = 0.1; 
+             
+             // Set gain to essentially zero
+             // 0.00001 is enough to keep the engine active but is mathematically too small to move the speaker
+             gainNode.gain.value = 0.00001; 
+             
+             oscillator.connect(gainNode);
+             gainNode.connect(audioCtx.destination);
+             
+             oscillator.start();
+        };
+
         /************************************************************
          * 3. ICONS (Lucide replacements)
          ************************************************************/
@@ -207,6 +273,9 @@
         );
         const IconVolumeX = ({ className }) => (
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" x2="17" y1="9" y2="15"/><line x1="17" x2="23" y1="9" y2="15"/></svg>
+        );
+        const IconZap = ({ className }) => (
+             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
         );
 
         /************************************************************
@@ -290,7 +359,10 @@
                         {INTERVAL_OPTIONS.map((option) => (
                             <button
                                 key={option}
-                                onClick={() => onSelect(option)}
+                                onClick={(e) => {
+                                    e.stopPropagation(); // Prevent closing immediately
+                                    onSelect(option);
+                                }}
                                 className={`w-full flex items-center justify-center relative px-6 py-4 md:py-5 text-center border-b border-zinc-900 last:border-0 hover:bg-zinc-900 transition-colors group ${
                                     selectedInterval === option ? 'bg-zinc-900/50' : ''
                                 }`}
@@ -356,7 +428,10 @@
                         
                         {/* 1. Toggle */}
                         <div 
-                            onClick={() => onUpdateSettings({ enabled: !settings.enabled })}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                onUpdateSettings({ enabled: !settings.enabled });
+                            }}
                             className="flex items-center justify-center gap-4 cursor-pointer group hover:opacity-90 transition-opacity"
                         >
                             <label className="text-zinc-300 text-lg font-medium cursor-pointer group-hover:text-white transition-colors text-center">Enable Voice Announcement</label>
@@ -371,7 +446,10 @@
 
                         {/* 2. Test Button */}
                         <button 
-                            onClick={onTestVoice}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                onTestVoice();
+                            }}
                             className="w-full flex items-center justify-center gap-2 bg-white text-black font-bold py-4 text-lg rounded hover:bg-zinc-200 hover:scale-[1.01] active:scale-[0.99] transition-all"
                         >
                             <IconPlay className="w-5 h-5 fill-current" /> 
@@ -434,7 +512,7 @@
                     
                     <div className="w-full flex items-center gap-4 mb-2">
                         <button 
-                            onClick={() => onChange(volume === 0 ? 0.5 : 0)} 
+                            onClick={(e) => { e.stopPropagation(); onChange(volume === 0 ? 0.5 : 0); }} 
                             className="text-zinc-500 hover:text-white transition-colors focus:outline-none"
                         >
                             {volume === 0 ? <IconVolumeX className="w-8 h-8" /> : <IconVolume2 className="w-8 h-8" />}
@@ -446,7 +524,7 @@
                             max="1"
                             step="0.01"
                             value={volume}
-                            onChange={(e) => onChange(parseFloat(e.target.value))}
+                            onChange={(e) => { e.stopPropagation(); onChange(parseFloat(e.target.value)); }}
                             className="fader"
                             aria-label="Volume Control"
                             />
@@ -465,6 +543,7 @@
             const [currentTime, setCurrentTime] = React.useState(new Date());
             const [interval, setIntervalOption] = React.useState(DEFAULT_INTERVAL);
             const [voices, setVoices] = React.useState([]);
+            const [isKeepAliveActive, setIsKeepAliveActive] = React.useState(false);
             
             const [settings, setSettings] = React.useState({
                 enabled: true,
@@ -478,7 +557,10 @@
             });
 
             const lastSpokenTimeRef = React.useRef("");
+            const workerRef = React.useRef(null);
+            const wakeLockRef = React.useRef(null);
 
+            // Initialize Voices
             React.useEffect(() => {
                 const initVoices = async () => {
                     const availableVoices = await getAvailableVoices();
@@ -492,18 +574,51 @@
                 initVoices();
             }, []);
 
+            // ACTIVATE KEEP ALIVE on first interaction
+            const activateKeepAlive = React.useCallback(async () => {
+                if (isKeepAliveActive) return;
+
+                // 1. Start Silent Audio Loop
+                try {
+                    playSilentAudio();
+                } catch(e) { console.log("Audio ctx error", e)}
+
+                // 2. Request Wake Lock
+                const lock = await requestWakeLock();
+                wakeLockRef.current = lock;
+
+                // 3. Initialize Worker for Timing
+                if (!workerRef.current) {
+                    workerRef.current = new Worker(workerUrl);
+                    workerRef.current.onmessage = (e) => {
+                         if (e.data === 'tick') {
+                             handleTick();
+                         }
+                    };
+                    workerRef.current.postMessage('start');
+                }
+
+                setIsKeepAliveActive(true);
+            }, [isKeepAliveActive]);
+
+            const handleTick = () => {
+                const now = new Date();
+                setCurrentTime(now); // Updates UI
+                
+                // We access the LATEST state via refs or direct access inside the worker callback scope
+                // But in React functional components, this `checkAndSpeak` needs to access current settings.
+                // The cleanest way is to just set state, and let a useEffect react to the time change.
+                // However, useEffect might be throttled? No, the state update triggers re-render on main thread.
+                // BUT, to be safe, we call the logic directly here if we can access the refs.
+                // For simplicity in this structure, we will rely on the state update triggering the effect below.
+            };
+
+            // React to Time Change (triggered by Worker Tick)
             React.useEffect(() => {
-                const timer = setInterval(() => {
-                    const now = new Date();
-                    setCurrentTime(now);
-
-                    if (settings.enabled) {
-                        checkAndSpeak(now);
-                    }
-                }, 1000);
-
-                return () => clearInterval(timer);
-            }, [settings.enabled, interval, settings.volume, settings.selectedVoiceURI]);
+               if (settings.enabled) {
+                   checkAndSpeak(currentTime);
+               }
+            }, [currentTime, settings.enabled, interval, settings.volume, settings.selectedVoiceURI]);
 
             const checkAndSpeak = (time) => {
                 const minutes = time.getMinutes();
@@ -511,7 +626,8 @@
                 
                 const isIntervalMatch = minutes % interval === 0;
                 
-                if (isIntervalMatch && seconds === 0) {
+                // Allow a small buffer for the worker tick (0 or 1 second)
+                if (isIntervalMatch && seconds < 2) {
                     const timeSignature = `${time.getHours()}:${minutes}`;
                     
                     if (lastSpokenTimeRef.current !== timeSignature) {
@@ -526,19 +642,29 @@
                 speakTime(text, settings.selectedVoiceURI, settings.volume);
             }, [settings.selectedVoiceURI, settings.volume]);
 
+            // Interaction Handler Wrapper
+            const handleInteraction = () => {
+                activateKeepAlive();
+            };
+
             const toggleMenu = (menu) => {
+                handleInteraction();
                 setMenuState(prev => ({
                     interval: menu === 'interval' ? !prev.interval : false,
                     about: menu === 'about' ? !prev.about : false,
                 }));
             };
 
-            const closeMenus = () => {
-                setMenuState({ interval: false, about: false });
-            };
+            const updateSettings = (newVals) => {
+                handleInteraction();
+                setSettings(prev => ({ ...prev, ...newVals }));
+            }
 
             return (
-                <div className="h-[100dvh] w-screen bg-black text-white flex flex-col items-center justify-center p-2 md:p-4 overflow-hidden">
+                <div 
+                    className="h-[100dvh] w-screen bg-black text-white flex flex-col items-center justify-center p-2 md:p-4 overflow-hidden"
+                    onClick={handleInteraction} // Catch-all interaction handler
+                >
                     <div className="w-full max-w-[420px] h-full max-h-[90vh] md:max-h-[800px] bg-black border border-zinc-800 rounded-2xl shadow-[0_0_80px_rgba(255,255,255,0.03)] flex flex-col relative overflow-visible transition-all duration-300">
                         
                         <div className="flex-grow flex flex-col justify-center items-center px-4 min-h-0">
@@ -551,8 +677,9 @@
                                 isOpen={menuState.interval}
                                 onToggle={() => toggleMenu('interval')}
                                 onSelect={(val) => {
+                                    handleInteraction();
                                     setIntervalOption(val);
-                                    closeMenus();
+                                    setMenuState({ interval: false, about: false });
                                 }}
                                 onClose={() => setMenuState(prev => ({ ...prev, interval: false }))}
                             />
@@ -563,18 +690,25 @@
                                 isOpen={menuState.about}
                                 onToggle={() => toggleMenu('about')}
                                 onClose={() => setMenuState(prev => ({ ...prev, about: false }))}
-                                onUpdateSettings={(newVals) => setSettings(prev => ({ ...prev, ...newVals }))}
-                                onTestVoice={() => speakCurrentTime(currentTime)}
+                                onUpdateSettings={updateSettings}
+                                onTestVoice={() => {
+                                    handleInteraction();
+                                    speakCurrentTime(currentTime);
+                                }}
                             />
                         </div>
 
                         <div className="px-6 md:px-8 pb-4 pt-2 mt-auto border-t border-zinc-900/50 flex-shrink-0">
                             <VolumeSlider 
                                 volume={settings.volume}
-                                onChange={(vol) => setSettings(prev => ({ ...prev, volume: vol }))}
+                                onChange={(vol) => {
+                                    handleInteraction();
+                                    setSettings(prev => ({ ...prev, volume: vol }))
+                                }}
                             />
-                            <div className="mt-2 mb-2 text-center text-zinc-800 text-[10px] tracking-widest uppercase font-bold select-none">
-                                Audio Interval System
+                            <div className="mt-2 mb-2 text-center text-zinc-800 text-[10px] tracking-widest uppercase font-bold select-none flex items-center justify-center gap-2">
+                                <span>Audio Interval System</span>
+                                {isKeepAliveActive && <div className="w-1.5 h-1.5 rounded-full bg-green-900 animate-pulse" title="Keep-Alive Active"></div>}
                             </div>
                         </div>
 
@@ -593,6 +727,17 @@
                 <App />
             </React.StrictMode>
         );
+    </script>
+    
+    <!-- Register Service Worker -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('./service-worker.js')
+                    .then(reg => console.log('SW Registered!', reg))
+                    .catch(err => console.log('SW Failed', err));
+            });
+        }
     </script>
 </body>
 </html>
